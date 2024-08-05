@@ -1,0 +1,28 @@
+name: rf_amr
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.10
+  - pytorch=2.4
+  - pytorch-cuda=12.4
+  - lightning=2.3
+  - torchmetrics
+  - tensorboard
+  - scikit-learn
+  - numpy
+  - scipy
+  - h5py
+  - matplotlib
+  - seaborn
+  - jupyterlab
+  - notebook
+  - ipywidgets
+  - pytest
+  - pip
+  - pip:
+    # - git+https://github.com/mroftei/SionnaTorch.git@v0.3
+    # - git+https://github.com/robbmcleod/pyfastnoisesimd.git@v0.4.3
+    # - git+https://github.com/mroftei/TerrainGeneration@v0.3
