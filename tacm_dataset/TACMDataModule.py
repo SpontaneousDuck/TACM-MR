@@ -222,7 +222,7 @@ class TACMSubset(Dataset):
     def __len__(self):
         return len(self.x_indices)
 
-class TACM2024DataModule(pl.LightningDataModule):
+class TACMDataModule(pl.LightningDataModule):
     def __init__(self, 
                  dataset_path: str, 
                  batch_size, 
