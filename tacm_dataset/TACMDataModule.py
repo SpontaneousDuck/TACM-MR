@@ -7,7 +7,7 @@ from torch.utils.data import Sampler
 import numpy as np
 from torch.utils.data import Dataset, DataLoader, random_split, StackDataset, Subset
 # from scenario_generator import ScenarioGenerator
-from sionna_torch.ApplyTimeChannel import ApplyTimeChannel
+from .sionna_torch.ApplyTimeChannel import ApplyTimeChannel
 
 
 class TACMDataset:

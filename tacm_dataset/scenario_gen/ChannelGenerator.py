@@ -80,7 +80,7 @@ class ChannelGenerator:
                                 (rx_xyz[...,2:])), dim = 2)
         
         #2. Find the Outpost point by extending the line between the Tx and Rx beyond its original length
-        extended_distance = math.sqrt(2*(map_size)**2) + distance_path
+        extended_distance = math.sqrt(2*(map_size**2)) + distance_path
         distance_ratio = (extended_distance/distance_path).reshape(1,-1,1)
         max_points = torch.cat((((1.0 - distance_ratio) * tx_xyz[...,:2] + distance_ratio * rx_xyz[...,:2]), 
                                 (rx_xyz[...,2:])), dim = 2)
