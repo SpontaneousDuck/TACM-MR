@@ -1,4 +1,4 @@
-# Terrain Augmented Channel Model (TACM) Dataset
+# Topographically-Augmented Channel Model (TACM) Dataset
 This repostory hosts the code for the TACM dataset for automatic modulation recognition. Code is provided for generating the dataset and a PyTroch Lightning DataModule is also provided for using the genreted dataset. INstructions for using are below.
 
 ## Usage
