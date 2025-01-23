@@ -4,4 +4,4 @@ scipy
 matplotlib
 pandas
 matplotlib-label-lines
-pyfastnoisesimd @ git+https://github.com/robbmcleod/pyfastnoisesimd.git@v0.4.3
+# pyfastnoisesimd @ git+https://github.com/robbmcleod/pyfastnoisesimd.git@v0.4.3

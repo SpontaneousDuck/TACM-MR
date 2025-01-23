@@ -1,6 +1,6 @@
 from enum import IntEnum
 import torch
-import pyfastnoisesimd
+# import pyfastnoisesimd
 
 DEFAULT_MAP_CONFIG = {
     "foliage_freq": 0.005,
@@ -95,12 +95,12 @@ class MapGenerator():
         self.urban_threshold = urban_threshold
         self.noise_type = noise_type
 
-        if noise_type == 'simplex':
-            self.fns = pyfastnoisesimd.Noise(seed=seed, numWorkers=n_workers)
-            self.fns.noiseType = pyfastnoisesimd.NoiseType.Simplex
-        else:
-            gen = torch.Generator(device=device).manual_seed(seed)
-            self.fns = FractalPerlin2D((1,width,width), [(1,)*2], [.5], generator=gen)
+        # if noise_type == 'simplex':
+        #     self.fns = pyfastnoisesimd.Noise(seed=seed, numWorkers=n_workers)
+        #     self.fns.noiseType = pyfastnoisesimd.NoiseType.Simplex
+        # else:
+        gen = torch.Generator(device=device).manual_seed(seed)
+        self.fns = FractalPerlin2D((1,width,width), [(1,)*2], [.5], generator=gen)
 
         self.dtype = dtype
         self.device = device
