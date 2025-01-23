@@ -13,9 +13,10 @@ parser.add_argument("--nrx", type=int, default=8)
 parser.add_argument("--scen", type=str, default="a")
 parser.add_argument("--cspb", type=str, default="./CSPB.ML.2018R2_nonoise.hdf5")
 parser.add_argument("--out", type=str, default="./")
+parser.add_argument("--frmsz", type=int, default=1024)
 args = parser.parse_args()
 
-frame_size = 1024
+frame_size = args.frmsz
 n_rx = args.nrx
 f_c = 900e6
 bw = 30e3
@@ -67,7 +68,7 @@ scenario_gen = ScenarioGenerator(n_receivers=n_rx,
                                  map_size=map_size, 
                                  map_resolution=map_res, 
                                  min_receiver_dist=2, 
-                                 max_iter=100, 
+                                 max_iter=400, 
                                  frame_size=frame_size,
                                  f_c=900e6,
                                  bw=30e3,
@@ -85,6 +86,9 @@ pow_rx = torch.empty(len(x), n_rx, device=torch.device('cpu'))
 total_snr = torch.empty(len(x), device=torch.device('cpu'))
 total_snr_inband = torch.empty(len(x), device=torch.device('cpu'))
 h_t = torch.empty(len(x)//batch_size, n_rx, 1, 1, 1, frame_size+13, 14, device=torch.device('cpu'), dtype=x.dtype)
+topography = torch.empty(len(x)//batch_size, map_size, map_size, device=torch.device('cpu'))
+tx_xy = torch.empty(len(x)//batch_size, 1, 3, device=torch.device('cpu'))
+rx_xy = torch.empty(len(x)//batch_size, n_rx, 3, device=torch.device('cpu'))
 snr_gen = torch.Generator().manual_seed(seed)
 snr_min = -30
 snr_max = 10
@@ -109,6 +113,10 @@ for i in tqdm(range(0, len(x)//batch_size), miniters=100, mininterval=10):
 
     # z = z.squeeze(2,3)[...,scenario_gen.chan_gen.sionna.l_min*-1:scenario_gen.chan_gen.sionna.l_max*-1]
 
+    tx_xy[i] = scenario_gen.transmitters
+    rx_xy[i] = scenario_gen.receivers
+    topography[i] = scenario_gen.map
+
     # # Per-frame normalize to -1.0:1.0
     # new_min, new_max = -1.0, 1.0
     # z_max = torch.amax(torch.abs(z), axis=(1,2), keepdims=True) # farthest value from 0 in each channel
@@ -128,36 +136,44 @@ for i in tqdm(range(0, len(x)//batch_size), miniters=100, mininterval=10):
     # snr_inband[i:i+batch_size] = snr1_inband.flatten(1).cpu()
     # total_snr[i:i+batch_size] = snr_total.cpu()
     # total_snr_inband[i:i+batch_size] = snr_total_inband 
+ 
 
-
-h5py_path = f"{args.out}/TACM_2024_2_{args.nrx}rx_{args.scen}.h5py"
+h5py_path = f"{args.out}/TACM_2024_2_{args.nrx}rx_{args.scen}_{args.frmsz}_{map_res}.h5py"
+print("Writing: ", h5py_path)
 
 with h5py.File(h5py_path, "w") as f:
-    f['x'] = x.numpy(force=True)
-    f['y'] = y
-    f['h_t'] = h_t.numpy(force=True)
+    f.create_dataset('x', data=x.numpy(force=True), compression="gzip")
+    f.create_dataset('y', data=y, compression="gzip")
+    f.create_dataset('h_t', data=h_t.numpy(force=True), compression="gzip")
+    f.create_dataset('T0', data=t0, compression="gzip")
+    f.create_dataset('beta', data=beta, compression="gzip")
+    f.create_dataset('T_s', data=T_s, compression="gzip")
+    f.create_dataset('S_idx', data=sym_idx, compression="gzip")
+    f.create_dataset('tx_xy', data=tx_xy, compression="gzip")
+    f.create_dataset('rx_xy', data=rx_xy, compression="gzip")
+    f.create_dataset('topography', data=topography, compression="gzip")
     # f['p_rx'] = pow_rx.numpy(force=True)
     # f['snr'] = snr.numpy(force=True)
     # f['snr_inband'] = snr_inband.numpy(force=True)
     # f['snr_total'] = total_snr.numpy(force=True)
     # f['snr_total_inband'] = total_snr_inband.numpy(force=True)
-    f['T0'] = t0
-    f['beta'] = beta
-    f['T_s'] = T_s
-    f['S_idx'] = sym_idx
 
 if args.scen == "c" or args.scen == "a" or args.scen == "b":
     for nrx in [8, 4, 2]:
         # Scenario B
-        h5py_path = f"/work/esl/mroftei/datasets/TACM2024.2.1/TACM_2024_2_{nrx}rx_b.h5py"
+        h5py_path = f"{args.out}/TACM_2024_2_{nrx}rx_b_{args.frmsz}_{map_res}.h5py"
+        print("Writing: ", h5py_path)
         with h5py.File(h5py_path, "w") as f:
-            f['x'] = x[::nrx].numpy(force=True)
-            f['y'] = y[::nrx]
-            f['h_t'] = h_t[::nrx, :nrx].numpy(force=True)
-            f['T0'] = t0[::nrx]
-            f['beta'] = beta[::nrx]
-            f['T_s'] = T_s[::nrx]
-            f['S_idx'] = sym_idx[::nrx]
+            f.create_dataset('x', data=x[::nrx].numpy(force=True), compression="gzip")
+            f.create_dataset('y', data=y[::nrx], compression="gzip")
+            f.create_dataset('h_t', data=h_t[::nrx, :nrx].numpy(force=True), compression="gzip")
+            f.create_dataset('T0', data=t0[::nrx], compression="gzip")
+            f.create_dataset('beta', data=beta[::nrx], compression="gzip")
+            f.create_dataset('T_s', data=T_s[::nrx], compression="gzip")
+            f.create_dataset('S_idx', data=sym_idx[::nrx], compression="gzip")
+            f.create_dataset('tx_xy', data=tx_xy, compression="gzip")
+            f.create_dataset('rx_xy', data=rx_xy, compression="gzip")
+            f.create_dataset('topography', data=topography, compression="gzip")
             # f['p_rx'] = pow_rx[::nrx].numpy(force=True)
             # f['snr'] = snr[::nrx].numpy(force=True)
             # f['snr_inband'] = snr_inband[::nrx].numpy(force=True)
@@ -165,15 +181,19 @@ if args.scen == "c" or args.scen == "a" or args.scen == "b":
             # f['snr_total_inband'] = total_snr_inband[::nrx].numpy(force=True)
 
         # Scenario C
-        h5py_path = f"/work/esl/mroftei/datasets/TACM2024.2.1/TACM_2024_2_{nrx}rx_c.h5py"
+        h5py_path = f"{args.out}/TACM_2024_2_{nrx}rx_c_{args.frmsz}_{map_res}.h5py"
+        print("Writing: ", h5py_path)
         with h5py.File(h5py_path, "w") as f:
-            f['x'] = x.numpy(force=True)
-            f['y'] = y
-            f['h_t'] = h_t[:, :nrx].flatten(0,1).unsqueeze(1).numpy(force=True)
-            f['T0'] = t0
-            f['beta'] = beta
-            f['T_s'] = T_s
-            f['S_idx'] = sym_idx
+            f.create_dataset('x', data=x.numpy(force=True), compression="gzip")
+            f.create_dataset('y', data=y, compression="gzip")
+            f.create_dataset('h_t', data=h_t[:, :nrx].flatten(0,1).unsqueeze(1).numpy(force=True), compression="gzip")
+            f.create_dataset('T0', data=t0, compression="gzip")
+            f.create_dataset('beta', data=beta, compression="gzip")
+            f.create_dataset('T_s', data=T_s, compression="gzip")
+            f.create_dataset('S_idx', data=sym_idx, compression="gzip")
+            f.create_dataset('tx_xy', data=tx_xy, compression="gzip")
+            f.create_dataset('rx_xy', data=rx_xy, compression="gzip")
+            f.create_dataset('topography', data=topography, compression="gzip")
             # f['x'] = x.repeat_interleave(nrx, dim=0).reshape(-1, 1, frame_size).numpy(force=True)
             # f['y'] = y.repeat_interleave(nrx, dim=0)
             # f['h_t'] = h_t[:, :nrx].flatten(0,1).unsqueeze(1).numpy(force=True)
@@ -187,3 +207,5 @@ if args.scen == "c" or args.scen == "a" or args.scen == "b":
             # f['snr_total'] = snr.reshape(-1, 1).numpy(force=True)
             # bw = (total_snr - total_snr_inband)
             # f['snr_total_inband'] = (snr - bw[:,None]).reshape(-1, 1).numpy(force=True)
+
+print("Done")

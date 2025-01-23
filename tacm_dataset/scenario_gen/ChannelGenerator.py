@@ -34,9 +34,10 @@ class ChannelGenerator:
 
         self.sionna_dev = device
         self.sionna = SionnaScenario(n_bs=n_rx, n_ut=n_tx, batch_size=batch_size, n_time_samples=frame_size, f_c=f_c, bw=bw, noise_power_dB=noise_power_dB, seed=seed, dtype=dtype.to_complex(), device=self.sionna_dev)
+        filt_size = 27
         self.avg_filter = torch.nn.Sequential(
-            torch.nn.ReplicationPad1d(27//2),
-            torch.nn.AvgPool1d(kernel_size=27, stride=1)
+            torch.nn.ReplicationPad1d(filt_size//2),
+            torch.nn.AvgPool1d(kernel_size=filt_size, stride=1)
         )
 
     def __call__(

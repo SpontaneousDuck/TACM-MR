@@ -58,6 +58,8 @@ class TACMDataset:
             beta = torch.from_numpy(f['beta'][()])
             T_s = torch.from_numpy(f['T_s'][()])
             S_idx = torch.from_numpy(f['S_idx'][()])
+            tx_xy = torch.from_numpy(f['tx_xy'][()]) * self.map_res
+            rx_xy = torch.from_numpy(f['rx_xy'][()]) * self.map_res
 
         print("Preprocessing Data")
         h_t = h_t.reshape(-1, n_rx, *h_t.shape[2:])
@@ -97,12 +99,14 @@ class TACMDataset:
         self.data_T_s = T_s
         self.data_beta = beta
         self.data_S_idx = S_idx
+        self.data_tx_xy = tx_xy
+        self.data_rx_xy = rx_xy
 
     def __getitem__(self, index):
         # return {x=x[index], y=y, T_s=T_s, beta=beta, S_idx=sym_idx, snr=snr, snr_total=total_snr, pow_rx=pow_rx}
         x = self.data_x[index[0]]
         h_t = self.data_h_t[index[1]]
-        return {'x':x, 'h_t': h_t, 'y':self.data_y[index[0]], 'T_s':self.data_T_s[index[0]], 'beta':self.data_beta[index[0]], 'S_idx':self.data_S_idx[index[0]]}
+        return {'x':x, 'h_t': h_t, 'y':self.data_y[index[0]], 'T_s':self.data_T_s[index[0]], 'beta':self.data_beta[index[0]], 'S_idx':self.data_S_idx[index[0]], 'tx_xy':self.data_tx_xy[index[1]], 'rx_xy':self.data_rx_xy[index[1]]}
         # z, rx_pow_db, snr = self._apply_channel(x[:,:1,None].to(self.device), h_t.to(self.device), None)
         # z = z.squeeze(2,3)[...,self.l_min*-1:self.l_max*-1]
 
@@ -269,10 +273,11 @@ class TACMDataModule(pl.LightningDataModule):
         if not len(self.ds_train) or not len(self.ds_val) or not len(self.ds_test):
             self.generator = torch.Generator().manual_seed(self.seed)
             
-            self.snr_gen = torch.Generator(self.trainer.strategy.root_device).manual_seed(self.seed)
             self.l_min, self.l_max = -6, int(np.ceil(3e-6*self.bw)) + 6
             l_tot = self.l_max-self.l_min+1
-            self._apply_channel = ApplyTimeChannel(self.frame_size, l_tot=l_tot, rng=self.snr_gen, add_awgn=True, device=self.trainer.strategy.root_device)
+            dev = self.trainer.strategy.root_device if self.trainer is not None else torch.get_default_device()
+            self.snr_gen = torch.Generator(dev).manual_seed(self.seed)
+            self._apply_channel = ApplyTimeChannel(self.frame_size, l_tot=l_tot, rng=self.snr_gen, add_awgn=True, device=dev)
 
             self.ds = TACMDataset(self.dataset_path,
                                   frame_size=self.frame_size,
