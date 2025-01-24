@@ -62,7 +62,13 @@ class TACMDataset:
             rx_xy = torch.from_numpy(f['rx_xy'][()]) * self.map_res
 
         print("Preprocessing Data")
-        h_t = h_t.reshape(-1, n_rx, *h_t.shape[2:])
+        # h_t = h_t.reshape(-1, n_rx, *h_t.shape[2:])
+        # tx_xy = tx_xy.reshape(-1, n_rx, 3)
+        # rx_xy = rx_xy.reshape(-1, n_rx, 3)
+        h_t = h_t[:,:n_rx]
+        tx_xy = tx_xy[:,:n_rx]
+        rx_xy = rx_xy[:,:n_rx]
+
         # self.scenario_gen = ScenarioGenerator(n_receivers=n_rx, 
         #                                         batch_size=self.gen_batch_size, 
         #                                         map_size=self.map_size, 
