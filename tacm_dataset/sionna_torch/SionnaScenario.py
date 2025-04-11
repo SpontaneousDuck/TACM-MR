@@ -217,7 +217,7 @@ class SionnaScenario:
         h_T = torch.sum(h*g, axis=-3)
 
         # h_snr = 10*torch.log10(torch.mean(torch.sum(torch.abs(h_T), -1) ** 2, -1)) - 10*np.log10(self.noise_power_lin)
-        h_gain = torch.mean(torch.sum(torch.abs(h_T), -1) ** 2, -1)
+        h_gain = torch.mean(torch.sum(torch.abs(h_T) ** 2, -1), -1)
 
         return h_T, h_gain
 
