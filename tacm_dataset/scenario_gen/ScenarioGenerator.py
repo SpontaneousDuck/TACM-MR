@@ -97,6 +97,8 @@ class ScenarioGenerator:
                 iter_control += 1
                 try:
                     h_T, self.receivers = self.chan_gen(self.map, self.transmitters, self.receivers, target_pow_db, los_requested=False)
+                    if self.chan_gen.sionna.n_samples == 1:
+                        h_T = h_T[...,:1,:]
                     return h_T
                 except AssertionError as e:
                     if self._debug: print(e)

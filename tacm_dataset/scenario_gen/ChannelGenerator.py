@@ -104,9 +104,8 @@ class ChannelGenerator:
         
         #5. Call the channel gain function and obtain the Power and the Channel_Z values
         self.sionna.update_topology(tx_xyz_replicated, sprayed_tensor, scen_map, map_resolution=self.config['map_resolution'], direction=self.config['direction'], los_requested=los_requested)
-        h_T, rx_pow = self.sionna.generate_channels()
+        _, rx_pow = self.sionna.generate_channels()
         rx_pow_db = 10*torch.log10(rx_pow).to(self.device)
-        h_T = h_T.to(self.device)
         rx_pow_db = rx_pow_db.to(self.device).squeeze((2,4)) #batch_size,n_rx,x_tx 
         
         # Take the PowerDB and filter it, and a form a smooth curve
@@ -156,7 +155,6 @@ class ChannelGenerator:
             # Call the channel gain function
             self.sionna.update_topology(tx_xyz_replicated, rx_xyz_replicated, scen_map, map_resolution=self.config['map_resolution'], direction=self.config['direction'], los_requested=los_requested)
             h_T, rx_pow_linear = self.sionna.generate_channels()
-            h_T = h_T.to(self.device)
             rx_pow_linear = rx_pow_linear.to(self.device).squeeze((2,4)) #128,n_rx,x_tx  
             
             # Find the index of the closest value of the Power to the targetPowerLinear
@@ -177,7 +175,7 @@ class ChannelGenerator:
                     print('The Target is found!!')
                     print("The near Optimal Rx locations are: ", rx_xyz)
                     print("The near Optimal SNRs are: ", 10*torch.log10(rx_pow_linear[passing_idx, torch.arange(h_T.shape[1])]))
-                return h_T[passing_idx, torch.arange(h_T.shape[1])][None], rx_xyz
+                return h_T[passing_idx, torch.arange(h_T.shape[1])][None].to(self.device), rx_xyz
             else:
                 if self.config['debug']: 
                     print("Current iter: ", iteration_val)

@@ -11,12 +11,14 @@ import numpy as np
 parser = ArgumentParser()
 parser.add_argument("--nrx", type=int, default=8)
 parser.add_argument("--scen", type=str, default="a")
-parser.add_argument("--cspb", type=str, default="./CSPB.ML.2018R2_nonoise.hdf5")
+parser.add_argument("--cspb", type=str, default="/work/esl/mroftei/datasets/CSPB.ML.2018R2_nonoise/CSPB.ML.2018R2_nonoise.hdf5")
 parser.add_argument("--out", type=str, default="./")
 parser.add_argument("--frmsz", type=int, default=1024)
+parser.add_argument("--simfrmsz", type=int, default=1024)
 args = parser.parse_args()
 
 frame_size = args.frmsz
+sim_frame_size = args.simfrmsz
 n_rx = args.nrx
 f_c = 900e6
 bw = 30e3
@@ -69,7 +71,7 @@ scenario_gen = ScenarioGenerator(n_receivers=n_rx,
                                  map_resolution=map_res, 
                                  min_receiver_dist=2, 
                                  max_iter=400, 
-                                 frame_size=frame_size,
+                                 frame_size=sim_frame_size,
                                  f_c=900e6,
                                  bw=30e3,
                                  noise_type='perlin',
@@ -85,7 +87,10 @@ snr_inband = torch.empty(len(x), n_rx, device=torch.device('cpu'))
 pow_rx = torch.empty(len(x), n_rx, device=torch.device('cpu'))
 total_snr = torch.empty(len(x), device=torch.device('cpu'))
 total_snr_inband = torch.empty(len(x), device=torch.device('cpu'))
-h_t = torch.empty(len(x)//batch_size, n_rx, 1, 1, 1, frame_size+13, 14, device=torch.device('cpu'), dtype=x.dtype)
+if sim_frame_size == 1:
+    h_t = torch.empty(len(x)//batch_size, n_rx, 1, 1, 1, 1, 14, device=torch.device('cpu'), dtype=x.dtype)
+else:
+    h_t = torch.empty(len(x)//batch_size, n_rx, 1, 1, 1, sim_frame_size+13, 14, device=torch.device('cpu'), dtype=x.dtype)
 topography = torch.empty(len(x)//batch_size, map_size, map_size, device=torch.device('cpu'))
 tx_xy = torch.empty(len(x)//batch_size, 1, 3, device=torch.device('cpu'))
 rx_xy = torch.empty(len(x)//batch_size, n_rx, 3, device=torch.device('cpu'))
