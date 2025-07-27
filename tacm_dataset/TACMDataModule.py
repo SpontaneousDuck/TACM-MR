@@ -1,72 +1,106 @@
-from typing import Iterable, List, Iterator, Sequence, Tuple, Union, cast
+"""
+TACM Dataset - Topographically-Augmented Channel Model Dataset for Automatic Modulation Recognition
+
+This module provides PyTorch Lightning data modules and utilities for working with the TACM dataset,
+which combines realistic terrain-based channel models with modulated signals for machine learning applications.
+
+The TACM dataset extends the CSPB.ML.2018R2 dataset by applying realistic channel effects derived from 
+terrain-based propagation models. This enables more realistic evaluation of automatic modulation 
+recognition systems under diverse propagation conditions.
+
+Classes:
+    TACMDataset: Main dataset class for loading and accessing TACM data
+    TACMSampler: Custom sampler for mixed signal-channel batch sampling
+    TACMSubset: Subset class for train/validation/test splits
+    TACMDataModule: PyTorch Lightning DataModule for TACM dataset
+
+Example:
+    >>> from tacm_dataset import TACMDataModule
+    >>> dm = TACMDataModule(
+    ...     dataset_root="/path/to/data",
+    ...     batch_size=32,
+    ...     download=True,  # Download base dataset on first use
+    ...     gen_chan=True   # Generate channel files on first use
+    ... )
+    >>> dm.prepare_data()
+    >>> dm.setup()
+    >>> train_loader = dm.train_dataloader()
+"""
+
+from typing import Iterator, List, Sequence
 import pytorch_lightning as pl
 import h5py
 import os
 import hashlib
-import urllib
+import urllib.request
 import zipfile
 import glob
 import torch
 import pandas as pd
-from pathlib import Path
-from torch.utils.data import Sampler
-from tqdm import tqdm
 import numpy as np
-from torch.utils.data import Dataset, DataLoader, random_split, StackDataset, Subset
-# from scenario_generator import ScenarioGenerator
+from pathlib import Path
+from torch.utils.data import Sampler, Dataset, DataLoader
+from tqdm import tqdm
+
 from .sionna_torch.ApplyTimeChannel import ApplyTimeChannel
 from .scenario_gen import ScenarioGenerator
 
-
-# TODO: subsample factor
-# TODO: download dataset from Chad's site
-
 class TACMDataset:
-    r"""Dataset as a stacking of multiple datasets.
-
-    This class is useful to assemble different parts of complex input data, given as datasets.
-
-    Example:
-        >>> # xdoctest: +SKIP
-        >>> images = ImageDataset()
-        >>> texts = TextDataset()
-        >>> tuple_stack = StackDataset(images, texts)
-        >>> tuple_stack[0] == (images[0], texts[0])
-        >>> dict_stack = StackDataset(image=images, text=texts)
-        >>> dict_stack[0] == {'image': images[0], 'text': texts[0]}
-
+    """
+    Dataset class for the TACM (Topographically-Augmented Channel Model) dataset.
+    
+    This dataset combines modulated signals from the CSPB.ML.2018R2 dataset with
+    realistic channel effects generated using terrain-based models.
+    
     Args:
-        *args (Dataset): Datasets for stacking returned as tuple.
-        **kwargs (Dataset): Datasets for stacking returned as dict.
+        dataset_root: Root directory containing the dataset files
+        frame_size: Size of each signal frame (default: 1024, must divide 32768 evenly)
+        chan_file: Optional path to specific channel file
+        scenario: Dataset scenario type ('a', 'b', 'c', or 'd')
+        n_rx: Number of receivers (default: 1)
+        map_res: Map resolution in meters/pixel (default: 20)
+        
+    The dataset supports different scenarios:
+        - Scenario 'a': Standard single-receiver setup
+        - Scenario 'b': Multi-receiver with subsampling
+        - Scenario 'c': Multi-receiver flattened format
+        - Scenario 'd': Multi-receiver with variable receiver count
+        
+    Raises:
+        RuntimeError: If frame_size does not evenly divide the original frame size (32768)
+        FileNotFoundError: If required dataset files are not found
     """
 
     def __init__(self, 
                  dataset_root: str, 
-                 frame_size=1024, 
+                 frame_size: int = 1024, 
                  chan_file: str = None,
                  scenario: str = 'a',
-                 n_rx = 1, 
-                 map_res = 20,
-                 device=None,
+                 n_rx: int = 1, 
+                 map_res: float = 20,
     ) -> None:
 
-        print('Loading Data...')
-        with h5py.File(os.path.join(dataset_root, "CSPB.ML.2018R2_nonoise.hdf5"), "r") as f:
+        print('Loading CSPB.ML.2018R2 signal data...')
+        cspb_path = os.path.join(dataset_root, "CSPB.ML.2018R2_nonoise.hdf5")
+        if not os.path.exists(cspb_path):
+            raise FileNotFoundError(f"CSPB dataset file not found: {cspb_path}")
+            
+        with h5py.File(cspb_path, "r") as f:
             x = torch.from_numpy(f['x'][()])
             y = torch.from_numpy(f['y'][()]).to(torch.long)
             t0 = torch.from_numpy(f['T0'][()]).to(torch.long)
             beta = torch.from_numpy(f['beta'][()])
             T_s = torch.from_numpy(f['T_s'][()])
             
-        print("Preprocessing Data")
+        print("Preprocessing signal data...")
         S_idx = torch.linspace(0, 1.0, x.shape[-1]).repeat(x.shape[0], 1)
         S_idx *= (32768/T_s[:,None])
         S_idx = S_idx.floor_().short()
 
-        # Reshape data to frame_size
-        # Need to be careful to use even multiples though so we don't break original fram barriers (32768 samples)
+        # Validate and reshape data to frame_size
         if 32768 % frame_size:
-            raise RuntimeError("frame_size is not an even divisor of the original frame size 32768.")
+            raise RuntimeError(f"frame_size ({frame_size}) is not an even divisor of the original frame size (32768).")
+            
         x = x.reshape((-1, 1, frame_size))
         reshape_factor = 32768//frame_size
         y = torch.repeat_interleave(y, reshape_factor)
@@ -77,95 +111,120 @@ class TACMDataset:
         S_idx -= S_idx[:,:1]
 
         # Scale signal to 0dB power
-        transmit_power = 0 # 0dB
+        transmit_power = 0  # 0dB
         signal_power = torch.mean(torch.abs(x) ** 2, -1)[...,None]
         target_snr_linear = 10 ** (transmit_power / 10)
-        # occupied_bw = 1 / np.repeat(t0[i:i+step], x1.shape[0]/step)[:,None,None,None]
-        # signal_scale_linear = np.sqrt((target_snr_linear * occupied_bw) / signal_power)
-        signal_scale_linear = torch.sqrt((target_snr_linear) / signal_power)
+        signal_scale_linear = torch.sqrt(target_snr_linear / signal_power)
         x = x * signal_scale_linear
         
+        # Load channel data
+        print('Loading channel data...')
         hdf5_path = chan_file if chan_file is not None else os.path.join(dataset_root, f"TACM_2025_1_channels_{scenario}_{n_rx if scenario == 'd' else 8}rx.h5py")
         if not os.path.exists(hdf5_path):
-            raise FileNotFoundError(f"Channel file {hdf5_path} does not exist, force channel generation.")
+            raise FileNotFoundError(f"Channel file {hdf5_path} does not exist. Set gen_chan=True to generate channel files.")
+            
         with h5py.File(hdf5_path, "r") as f:
             h_t = torch.from_numpy(f['h_t'][()])
             tx_xy = torch.from_numpy(f['tx_xy'][()])
             rx_xy = torch.from_numpy(f['rx_xy'][()])
             topography = torch.from_numpy(f['topography'][()]) 
 
+        # Process channel data based on scenario
         h_t = h_t[:,:n_rx]
         tx_xy = tx_xy[:,:n_rx]
         tx_xy[..., :2] *= map_res
         rx_xy = rx_xy[:,:n_rx]
         rx_xy[..., :2] *= map_res
 
+        # Store processed data
         self.data_x = x
         self.data_y = y
         self.data_T_s = T_s
         self.data_beta = beta
         self.data_S_idx = S_idx
-        match scenario:
-            case "a" | "d":
-                self.data_h_t = h_t
-                self.data_tx_xy = tx_xy
-                self.data_rx_xy = rx_xy
-                self.topography = topography
-            case "c":
-                self.data_h_t = h_t[:, :n_rx].flatten(0,1).unsqueeze(1)
-                self.data_tx_xy = tx_xy[:].repeat(n_rx, 1, 1)
-                self.data_rx_xy = rx_xy[:, :n_rx].flatten(0,1).unsqueeze(1)
-                self.topography = topography.repeat(n_rx, 1, 1)
-            case "b":
-                self.data_x = x[::n_rx]
-                self.data_y = y[::n_rx]
-                self.data_T_s = T_s[::n_rx]
-                self.data_beta = beta[::n_rx]
-                self.data_S_idx = S_idx[::n_rx]
-                self.data_h_t = h_t[::n_rx, :n_rx]
-                self.data_tx_xy = tx_xy[::n_rx]
-                self.data_rx_xy = rx_xy[::n_rx, :n_rx]
-                self.topography = topography[::n_rx]
-            case _:
-                raise ValueError("Unknown data scenario")
+        
+        # Configure data layout based on scenario
+        if scenario == "a" or scenario == "d":
+            # Standard setup - signals and channels paired directly
+            self.data_h_t = h_t
+            self.data_tx_xy = tx_xy
+            self.data_rx_xy = rx_xy
+            self.topography = topography
+        elif scenario == "c":
+            # Flattened multi-receiver format
+            self.data_h_t = h_t[:, :n_rx].flatten(0,1).unsqueeze(1)
+            self.data_tx_xy = tx_xy[:].repeat(n_rx, 1, 1)
+            self.data_rx_xy = rx_xy[:, :n_rx].flatten(0,1).unsqueeze(1)
+            self.topography = topography.repeat(n_rx, 1, 1)
+        elif scenario == "b":
+            # Multi-receiver with signal subsampling
+            self.data_x = x[::n_rx]
+            self.data_y = y[::n_rx]
+            self.data_T_s = T_s[::n_rx]
+            self.data_beta = beta[::n_rx]
+            self.data_S_idx = S_idx[::n_rx]
+            self.data_h_t = h_t[::n_rx, :n_rx]
+            self.data_tx_xy = tx_xy[::n_rx]
+            self.data_rx_xy = rx_xy[::n_rx, :n_rx]
+            self.topography = topography[::n_rx]
+        else:
+            raise ValueError(f"Unknown scenario '{scenario}'. Must be one of: 'a', 'b', 'c', 'd'")
 
     def __getitem__(self, index):
-        # return {x=x[index], y=y, T_s=T_s, beta=beta, S_idx=sym_idx, snr=snr, snr_total=total_snr, pow_rx=pow_rx}
+        """
+        Retrieve a single data sample.
+        
+        Args:
+            index: Tuple of (signal_index, channel_index)
+            
+        Returns:
+            Dictionary containing:
+                - 'x': Signal data
+                - 'h_t': Channel response
+                - 'y': Modulation class label
+                - 'T_s': Symbol period
+                - 'beta': Roll-off factor
+                - 'S_idx': Symbol indices
+                - 'tx_xy': Transmitter coordinates
+                - 'rx_xy': Receiver coordinates
+        """
         x = self.data_x[index[0]]
         h_t = self.data_h_t[index[1]]
-        return {'x':x, 'h_t': h_t, 'y':self.data_y[index[0]], 'T_s':self.data_T_s[index[0]], 'beta':self.data_beta[index[0]], 'S_idx':self.data_S_idx[index[0]], 'tx_xy':self.data_tx_xy[index[1]], 'rx_xy':self.data_rx_xy[index[1]]}
-
-    # def __getitems__(self, indices: list):
-    #     # add batched sampling support when parent datasets supports it.
-    #     if isinstance(self.datasets, dict):
-    #         dict_batch: List[T_dict] = [{} for _ in indices]
-    #         for k, dataset in self.datasets.items():
-    #             if callable(getattr(dataset, "__getitems__", None)):
-    #                 items = dataset.__getitems__(indices)  # type: ignore[attr-defined]
-    #                 if len(items) != len(indices):
-    #                     raise ValueError(
-    #                         "Nested dataset's output size mismatch."
-    #                         f" Expected {len(indices)}, got {len(items)}"
-    #                     )
-    #                 for data, d_sample in zip(items, dict_batch):
-    #                     d_sample[k] = data
-    #             else:
-    #                 for idx, d_sample in zip(indices, dict_batch):
-    #                     d_sample[k] = dataset[idx]
-    #         return dict_batch
+        return {
+            'x': x, 
+            'h_t': h_t, 
+            'y': self.data_y[index[0]], 
+            'T_s': self.data_T_s[index[0]], 
+            'beta': self.data_beta[index[0]], 
+            'S_idx': self.data_S_idx[index[0]], 
+            'tx_xy': self.data_tx_xy[index[1]], 
+            'rx_xy': self.data_rx_xy[index[1]]
+        }
 
     def __len__(self):
+        """Return the number of signal samples in the dataset."""
         return len(self.data_x)
 
-class TACMSampler(Sampler[List[int]]):
-    r"""Returns a mixed batch of samples and channels.
-
+class TACMSampler(Sampler[List]):
+    """
+    Custom sampler that returns mixed batches of signal and channel samples.
+    
+    This sampler ensures that each batch contains pairs of signal indices and
+    channel indices, allowing for random combinations of signals and channels
+    during training. This is essential for the TACM dataset where signals and
+    channels are independently sampled.
+    
     Args:
-        sampler (Sampler or Iterable): Base sampler. Can be any iterable object
-        batch_size (int): Size of mini-batch.
+        x_len: Number of signal samples
+        h_len: Number of channel samples  
+        batch_size: Size of mini-batch
+        generator: Random number generator for reproducibility
+        
+    Raises:
+        ValueError: If batch_size is not a positive integer
     """
 
-    def __init__(self, x_len, h_len, batch_size: int, generator=None) -> None:
+    def __init__(self, x_len: int, h_len: int, batch_size: int, generator=None) -> None:
         if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0:
             raise ValueError(f"batch_size should be a positive integer value, but got batch_size={batch_size}")
         self.x_len = x_len
@@ -178,6 +237,7 @@ class TACMSampler(Sampler[List[int]]):
             self.generator = generator
 
     def _sampler_iter(self) -> Iterator[int]:
+        """Generate random pairs of (signal_index, channel_index)."""
         x_iter = torch.randperm(self.x_len, generator=self.generator).tolist()
         h_perm = torch.randperm(self.h_len, generator=self.generator)
         repeat_factor = self.x_len // self.h_len
@@ -185,7 +245,8 @@ class TACMSampler(Sampler[List[int]]):
 
         yield from zip(x_iter, h_perm)
 
-    def __iter__(self) -> Iterator[List[int]]:
+    def __iter__(self) -> Iterator[List]:
+        """Iterate over batches of (signal_index, channel_index) pairs."""
         batch = [(0,0)] * self.batch_size
         idx_in_batch = 0
         for idx in self._sampler_iter():
@@ -194,20 +255,25 @@ class TACMSampler(Sampler[List[int]]):
             if idx_in_batch == self.batch_size:
                 yield batch
                 idx_in_batch = 0
-                batch = [0] * self.batch_size
+                batch = [(0,0)] * self.batch_size
         if idx_in_batch > 0:
             yield batch[:idx_in_batch]
 
     def __len__(self) -> int:
+        """Return the number of batches."""
         return (self.x_len + self.batch_size - 1) // self.batch_size
 
 class TACMSubset(Dataset):
-    r"""
-    Subset of a dataset at specified indices.
-
+    """
+    Subset of a TACM dataset at specified indices.
+    
+    This class allows for creating train/validation/test splits of the dataset
+    while maintaining separate indexing for signals and channels.
+    
     Args:
-        dataset (Dataset): The whole Dataset
-        indices (sequence): Indices in the whole set selected for subset
+        dataset: The parent TACMDataset
+        x_indices: Indices for signal samples
+        h_indices: Indices for channel samples
     """
 
     dataset: TACMDataset
@@ -220,21 +286,24 @@ class TACMSubset(Dataset):
         self.h_indices = h_indices
 
     def __getitem__(self, idx):
+        """
+        Retrieve a sample from the subset.
+        
+        Args:
+            idx: Index or list of (signal_index, channel_index) pairs
+            
+        Returns:
+            Sample data from the parent dataset
+        """
         if isinstance(idx, list):
             return self.dataset[[(self.x_indices[x_i], self.h_indices[h_i]) for x_i, h_i in idx]]
         return self.dataset[(self.x_indices[idx[0]], self.h_indices[idx[1]])]
 
-    # def __getitems__(self, indices: List[int]) -> List[T_co]:
-    #     # add batched sampling support when parent dataset supports it.
-    #     # see torch.utils.data._utils.fetch._MapDatasetFetcher
-    #     if callable(getattr(self.dataset, "__getitems__", None)):
-    #         return self.dataset.__getitems__([self.indices[idx] for idx in indices])  # type: ignore[attr-defined]
-    #     else:
-    #         return [self.dataset[self.indices[idx]] for idx in indices]
-
     def __len__(self):
+        """Return the number of samples in this subset."""
         return len(self.x_indices)
 
+# Download URLs and MD5 checksums for the CSPB.ML.2018R2 noise-free dataset files
 CSPB2018R2_NONOISE_META = [
     ('https://cyclostationary.blog/wp-content/uploads/2025/04/CSPB.ML_.2018R2_1_noisefree.zip', '70a9f6c207132f4a4dc5c14ef188b30a'), 
     ('https://cyclostationary.blog/wp-content/uploads/2025/04/CSPB.ML_.2018R2_2_noisefree.zip', '33c8fbf8fa533aae6bf0cd8e07597dbd'), 
@@ -268,25 +337,79 @@ CSPB2018R2_NONOISE_META = [
 ]
 
 class TACMDataModule(pl.LightningDataModule):
+    """
+    PyTorch Lightning DataModule for the TACM dataset.
+    
+    This DataModule handles data preparation, downloading, channel generation,
+    and provides train/validation/test dataloaders for the TACM dataset.
+    
+    Args:
+        dataset_root: Root directory where dataset files will be stored
+        batch_size: Batch size for dataloaders
+        download: Whether to download the base CSPB dataset if missing (default: False)
+        gen_chan: Whether to generate new channel files (default: False)
+        n_topo: Number of topographic scenarios to generate (default: 28000)
+        in_memory: Whether to keep data in memory (default: True)
+        frame_size: Size of signal frames in samples (default: 1024)
+        f_c: Carrier frequency in Hz (default: 900e6)
+        bw: Signal bandwidth in Hz (default: 30e3)
+        reuse_factor: Terrain reuse factor for efficiency (default: 128)
+        gen_batch_size: Batch size for channel generation (default: 128)
+        snr_inband: Whether to use in-band SNR calculation (default: True)
+        snr_range: SNR range in dB as [min, max] (default: [-30, 10])
+        scenario: Dataset scenario type ('a', 'b', 'c', or 'd') (default: 'a')
+        seed: Random seed for reproducibility (default: 43)
+        n_rx: Number of receivers (default: 8)
+        n_workers: Number of data loading workers (default: 8)
+        
+    Scenarios:
+        - 'a': Standard single-receiver setup
+        - 'b': Multi-receiver with signal subsampling  
+        - 'c': Multi-receiver flattened format
+        - 'd': Multi-receiver with variable receiver count
+        
+    Example:
+        >>> dm = TACMDataModule(
+        ...     dataset_root="~/data/tacm",
+        ...     batch_size=32,
+        ...     download=True,
+        ...     gen_chan=True
+        ... )
+        >>> dm.prepare_data()
+        >>> dm.setup()
+        >>> train_loader = dm.train_dataloader()
+    """
+    
     def __init__(self, 
                  dataset_root: str, 
-                 batch_size, 
+                 batch_size: int, 
                  download: bool = False,
                  gen_chan: bool = False,
                  n_topo: int = 28000,
                  in_memory: bool = True,
-                 frame_size=1024, 
-                 f_c=900e6, 
-                 bw=30e3, 
-                 reuse_factor=128,
-                 gen_batch_size = 128,
-                 snr_inband=True, 
-                 snr_range: List[int] = [-30,10],
-                 scenario=None, 
-                 seed: int = 42, 
-                 n_rx = 1, 
-                 n_workers:int = 8):
+                 frame_size: int = 1024, 
+                 f_c: float = 900e6, 
+                 bw: float = 30e3, 
+                 reuse_factor: int = 128,
+                 gen_batch_size: int = 128,
+                 snr_inband: bool = True, 
+                 snr_range: List[int] = [-30, 10],
+                 scenario: str = 'a', 
+                 seed: int = 43, 
+                 n_rx: int = 8, 
+                 n_workers: int = 8):
         super().__init__()
+        
+        # Validate inputs
+        if scenario not in ['a', 'b', 'c', 'd']:
+            raise ValueError(f"Invalid scenario '{scenario}'. Must be one of: 'a', 'b', 'c', 'd'")
+        if frame_size <= 0 or 32768 % frame_size != 0:
+            raise ValueError(f"frame_size ({frame_size}) must be positive and divide 32768 evenly")
+        if batch_size <= 0:
+            raise ValueError(f"batch_size ({batch_size}) must be positive")
+        if n_rx <= 0:
+            raise ValueError(f"n_rx ({n_rx}) must be positive")
+            
         self.dataset_root = os.path.expanduser(dataset_root)
         self.batch_size = batch_size if scenario != "c" else batch_size//n_rx
         self.download = download
@@ -301,37 +424,64 @@ class TACMDataModule(pl.LightningDataModule):
         self.n_topo = n_topo
         self.f_c = f_c
         self.bw = bw
-        self.map_res = 20 # meters/pixel
-        self.map_size = 1000 # Pixels x Pixels map size
+        self.map_res = 20  # meters/pixel
+        self.map_size = 1000  # Pixels x Pixels map size
         self.n_workers = n_workers
         self.snr_inband = snr_inband
         self.snr_range = snr_range
         self.scenario = scenario
 
+        # Calculate noise power
         noise_power_db = -173.8 + 10 * np.log10(bw)
         self.noise_power_lin = 10**((noise_power_db)/10)
        
+        # Define modulation classes
         self.classes = ['bpsk', 'qpsk', '8psk', 'dqpsk', 'msk', '16qam', '64qam', '256qam']
         self.ds_train, self.ds_val, self.ds_test = [], [], []
 
 
-    def prepare_data(self): 
-        if self.download or not os.path.exists(os.path.join(self.dataset_root, "CSPB.ML.2018R2_nonoise.hdf5")):
-            print("Downloading CSPB files")
-            download_root = os.path.join(self.dataset_root, "CSPB_ML_2018R2_nonoise_zips")
-            os.makedirs(download_root, exist_ok=True)
-            extract_root = os.path.join(self.dataset_root, "CSPB_ML_2018R2_nonoise_signals")
-            os.makedirs(extract_root, exist_ok=True)
+    def prepare_data(self):
+        """
+        Download and prepare the base dataset files.
+        
+        This method:
+        1. Downloads the CSPB.ML.2018R2 noise-free dataset if not present
+        2. Extracts and processes the signal files
+        3. Creates a consolidated HDF5 file with signals and metadata
+        4. Generates channel files using terrain-based models if requested
+        
+        Note: This method is called only once per node in distributed training.
+        """ 
+        # Check if CSPB dataset needs to be downloaded and processed
+        cspb_path = os.path.join(self.dataset_root, "CSPB.ML.2018R2_nonoise.hdf5")
+        if self.download or not os.path.exists(cspb_path):
+            print("Downloading and processing CSPB.ML.2018R2 dataset...")
+            self._download_and_process_cspb()
 
-            for url, zip_md5 in CSPB2018R2_NONOISE_META:
-                fname = os.path.basename(url)
-                if 'zip' in os.path.basename(url):
-                    fpath = os.path.join(download_root, fname)
-                else: 
-                    fpath = os.path.join(extract_root, fname)
+        # Check if channel files need to be generated
+        channel_path = os.path.join(self.dataset_root, f"TACM_2025_1_channels_{self.scenario}_{self.n_rx if self.scenario == 'd' else 8}rx.h5py")
+        if self.gen_chan or not os.path.exists(channel_path):
+            print("Generating channel files...")
+            self._generate_channel_files(channel_path)
 
-                # Download file
-                print("Downloading " + url + " to " + fpath)
+    def _download_and_process_cspb(self):
+        """Download and process the CSPB.ML.2018R2 dataset."""
+        download_root = os.path.join(self.dataset_root, "CSPB_ML_2018R2_nonoise_zips")
+        extract_root = os.path.join(self.dataset_root, "CSPB_ML_2018R2_nonoise_signals")
+        os.makedirs(download_root, exist_ok=True)
+        os.makedirs(extract_root, exist_ok=True)
+
+        # Download and extract files
+        for url, zip_md5 in CSPB2018R2_NONOISE_META:
+            fname = os.path.basename(url)
+            if 'zip' in fname:
+                fpath = os.path.join(download_root, fname)
+            else: 
+                fpath = os.path.join(extract_root, fname)
+
+            # Download file if it doesn't exist
+            if not os.path.exists(fpath):
+                print(f"Downloading {url} to {fpath}")
                 with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "pytorch/vision"})) as response:
                     content = iter(lambda: response.read(1024*32), b"")
                     with open(fpath, "wb") as fh:
@@ -340,131 +490,161 @@ class TACMDataModule(pl.LightningDataModule):
                                 continue
                             fh.write(chunk)
 
-                # check integrity of downloaded file
-                md5_alg = hashlib.md5(usedforsecurity=False)
-                with open(fpath, "rb") as f:
-                    for chunk in iter(lambda: f.read(1024*1024), b""):
-                        md5_alg.update(chunk)
-                if zip_md5 != md5_alg.hexdigest():
-                    raise RuntimeError(f"File not found or corrupted: {fpath}")
+            # Verify file integrity
+            md5_alg = hashlib.md5(usedforsecurity=False)
+            with open(fpath, "rb") as f:
+                for chunk in iter(lambda: f.read(1024*1024), b""):
+                    md5_alg.update(chunk)
+            if zip_md5 != md5_alg.hexdigest():
+                raise RuntimeError(f"File not found or corrupted: {fpath}")
 
-                # Unzip zip file downloaded
-                if 'zip' in fname:
-                    print(f"Extracting {fpath} to {extract_root}")
-                    with zipfile.ZipFile(fpath, "r", compression=zipfile.ZIP_STORED) as zipf:
-                        zipf.extractall(extract_root)
+            # Extract zip files
+            if 'zip' in fname:
+                print(f"Extracting {fpath} to {extract_root}")
+                with zipfile.ZipFile(fpath, "r", compression=zipfile.ZIP_STORED) as zipf:
+                    zipf.extractall(extract_root)
 
-            fnames = glob.glob(os.path.join(extract_root, "*", "signal*.tim"))
-            fnames = sorted(fnames, key=lambda x: int(Path(x).stem.split("_")[-1]))
+        # Process signal files
+        print("Processing signal files...")
+        fnames = glob.glob(os.path.join(extract_root, "*", "signal*.tim"))
+        fnames = sorted(fnames, key=lambda x: int(Path(x).stem.split("_")[-1]))
 
-            x = np.array([np.fromfile(fname)[1:].view(np.complex64) for fname in fnames])
+        x = np.array([np.fromfile(fname)[1:].view(np.complex64) for fname in fnames])
 
-            labels = pd.read_csv(os.path.join(extract_root, "signal_record_C_2023.txt"), header=None, sep='\s+', index_col=0, names=['label', 'T0', 'cfo', 'beta', 'U', 'D', 'SNR', 'P(N)'])
-            y = np.array([self.classes.index(label) for label in labels.label])
+        # Load and process labels
+        labels = pd.read_csv(os.path.join(extract_root, "signal_record_C_2023.txt"), 
+                           header=None, sep='\s+', index_col=0, 
+                           names=['label', 'T0', 'cfo', 'beta', 'U', 'D', 'SNR', 'P(N)'])
+        y = np.array([self.classes.index(label) for label in labels.label])
 
-            # Set all MSK to a beta of 0.5, this gives us about null-to-null for bandwidth
-            labels.loc[labels['label'] == "msk", 'beta'] = 0.5
+        # Set all MSK to a beta of 0.5 for consistent bandwidth
+        labels.loc[labels['label'] == "msk", 'beta'] = 0.5
 
-            t0 = labels.T0.to_numpy()
-            d = labels.D.to_numpy()
-            u = labels.U.to_numpy()
+        # Extract parameters
+        t0 = labels.T0.to_numpy()
+        d = labels.D.to_numpy()
+        u = labels.U.to_numpy()
 
-            with h5py.File(os.path.join(self.dataset_root, "CSPB.ML.2018R2_nonoise.hdf5"), "w") as f:
-                f['x'] = x
-                f['y'] = y
-                f['T0'] = t0
-                f['cfo'] = labels.cfo.to_numpy()
-                f['beta'] = labels.beta.to_numpy()
-                f['U'] = u
-                f['D'] = d
-                f['T_s'] = 1 / ((1/t0)*(d/u))
+        # Save processed data to HDF5
+        print(f"Saving processed data to {os.path.join(self.dataset_root, 'CSPB.ML.2018R2_nonoise.hdf5')}")
+        with h5py.File(os.path.join(self.dataset_root, "CSPB.ML.2018R2_nonoise.hdf5"), "w") as f:
+            f['x'] = x
+            f['y'] = y
+            f['T0'] = t0
+            f['cfo'] = labels.cfo.to_numpy()
+            f['beta'] = labels.beta.to_numpy()
+            f['U'] = u
+            f['D'] = d
+            f['T_s'] = 1 / ((1/t0)*(d/u))
 
-        h5py_path = os.path.join(self.dataset_root, f"TACM_2025_1_channels_{self.scenario}_{self.n_rx if self.scenario == 'd' else 8}rx.h5py")
-        if self.gen_chan or not os.path.exists(h5py_path):
-            print("Generating Channels File")
-            batch_size = 128
-            n_rx = self.n_rx if self.scenario == "d" else 8
-            dev = self.trainer.strategy.root_device if self.trainer is not None else torch.get_default_device()
-            scenario_gen = ScenarioGenerator(n_receivers=n_rx, 
-                                            batch_size=batch_size, 
-                                            map_size=self.map_size, 
-                                            map_resolution=self.map_res, 
-                                            min_receiver_dist=2, 
-                                            max_iter=400, 
-                                            frame_size=1,
-                                            f_c=self.f_c,
-                                            bw=self.bw,
-                                            noise_type='perlin',
-                                            seed=self.seed,
-                                            target_total_p=False, 
-                                            dtype=torch.float32, 
-                                            device=dev)
+    def _generate_channel_files(self, channel_path: str):
+        """Generate channel files using terrain-based models."""
+        batch_size = 128
+        n_rx = self.n_rx if self.scenario == "d" else 8
+        dev = self.trainer.strategy.root_device if self.trainer is not None else torch.get_default_device()
+        
+        scenario_gen = ScenarioGenerator(
+            n_receivers=n_rx, 
+            batch_size=batch_size, 
+            map_size=self.map_size, 
+            map_resolution=self.map_res, 
+            min_receiver_dist=2, 
+            max_iter=400, 
+            frame_size=1,
+            f_c=self.f_c,
+            bw=self.bw,
+            noise_type='perlin',
+            seed=self.seed,
+            target_total_p=False, 
+            dtype=torch.float32, 
+            device=dev
+        )
 
-            h_t = torch.empty((self.n_topo, n_rx, 1, 1, 1, 1, 14), device=torch.device('cpu'), dtype=torch.complex64)
-            topography = torch.empty(self.n_topo, self.map_size, self.map_size, device=torch.device('cpu'))
-            tx_xy = torch.empty(self.n_topo, 1, 3, device=torch.device('cpu'))
-            rx_xy = torch.empty(self.n_topo, n_rx, 3, device=torch.device('cpu'))
-            snr_gen = torch.Generator().manual_seed(self.seed)
-            snr_min = self.snr_range[0]
-            snr_max = self.snr_range[1]
+        # Pre-allocate arrays for generated data
+        h_t = torch.empty((self.n_topo, n_rx, 1, 1, 1, 1, 14), device=torch.device('cpu'), dtype=torch.complex64)
+        topography = torch.empty(self.n_topo, self.map_size, self.map_size, device=torch.device('cpu'))
+        tx_xy = torch.empty(self.n_topo, 1, 3, device=torch.device('cpu'))
+        rx_xy = torch.empty(self.n_topo, n_rx, 3, device=torch.device('cpu'))
+        
+        snr_gen = torch.Generator().manual_seed(self.seed)
+        snr_min, snr_max = self.snr_range[0], self.snr_range[1]
+        target_snr = torch.empty(n_rx)
 
-            target_snr = torch.empty(n_rx)
-            for i in tqdm(range(0, self.n_topo), miniters=100, mininterval=10):
+        # Generate channel scenarios
+        for i in tqdm(range(0, self.n_topo), desc="Generating channels", miniters=100, mininterval=10):
+            target_snr = target_snr.uniform_(snr_min, snr_max, generator=snr_gen)
+            
+            if self.scenario == "d":
+                target_power = target_snr + 10*np.log10((10**(scenario_gen.chan_gen.get_noise_power()/10))*n_rx)
+                target_power[:] = 10*torch.log10((10**(target_power[0]/10))/n_rx)
+            else:
+                target_power = target_snr + scenario_gen.chan_gen.get_noise_power()
+                 
+            h_t[i] = scenario_gen.RegenerateFullScenario(target_power)
+            tx_xy[i] = scenario_gen.transmitters
+            rx_xy[i] = scenario_gen.receivers
+            topography[i] = scenario_gen.map
 
-                target_snr = target_snr.uniform_(snr_min, snr_max, generator=snr_gen)
-                if self.scenario == "d":
-                    target_power = target_snr + 10*np.log10((10**(scenario_gen.chan_gen.get_noise_power()/10))*n_rx)
-                    target_power[:] = 10*torch.log10((10**(target_power[0]/10))/n_rx)
-                else:
-                    target_power = target_snr + scenario_gen.chan_gen.get_noise_power()
-                     
-                h_t[i] = scenario_gen.RegenerateFullScenario(target_power)
-                tx_xy[i] = scenario_gen.transmitters
-                rx_xy[i] = scenario_gen.receivers
-                topography[i] = scenario_gen.map
-
-            print("Writing: ", h5py_path)
-
-            with h5py.File(h5py_path, "w") as f:
-                f.create_dataset('h_t', data=h_t.numpy(force=True), compression="gzip")
-                f.create_dataset('tx_xy', data=tx_xy, compression="gzip")
-                f.create_dataset('rx_xy', data=rx_xy, compression="gzip")
-                f.create_dataset('topography', data=topography, compression="gzip")
+        print(f"Writing channel data to: {channel_path}")
+        with h5py.File(channel_path, "w") as f:
+            f.create_dataset('h_t', data=h_t.numpy(force=True), compression="gzip")
+            f.create_dataset('tx_xy', data=tx_xy, compression="gzip")
+            f.create_dataset('rx_xy', data=rx_xy, compression="gzip")
+            f.create_dataset('topography', data=topography, compression="gzip")
 
     def setup(self, stage: str = None):
+        """
+        Set up the dataset splits and channel application.
+        
+        This method:
+        1. Creates the main dataset object
+        2. Splits data into train/validation/test sets (60%/20%/20%)
+        3. Initializes channel application for realistic propagation effects
+        
+        Args:
+            stage: Optional stage identifier ('fit', 'test', etc.)
+        """
         if not len(self.ds_train) or not len(self.ds_val) or not len(self.ds_test):
             self.generator = torch.Generator().manual_seed(self.seed)
             
+            # Set up channel processing parameters
             self.l_min, self.l_max = -6, int(np.ceil(3e-6*self.bw)) + 6
             l_tot = self.l_max-self.l_min+1
             dev = self.trainer.strategy.root_device if self.trainer is not None else torch.get_default_device()
             self.snr_gen = torch.Generator(dev).manual_seed(self.seed)
             self._apply_channel = ApplyTimeChannel(self.frame_size, l_tot=l_tot, rng=self.snr_gen, add_awgn=True, device=dev)
 
-            self.ds = TACMDataset(self.dataset_root,
-                                  frame_size=self.frame_size,
-                                  n_rx = self.n_rx,
-                                  scenario = self.scenario,
-                                  map_res = self.map_res,
-                                  )
+            # Create main dataset
+            self.ds = TACMDataset(
+                self.dataset_root,
+                frame_size=self.frame_size,
+                n_rx=self.n_rx,
+                scenario=self.scenario,
+                map_res=self.map_res,
+            )
 
+            # Create train/validation/test splits (60%/20%/20%)
             subset_lengths = [0.6, 0.2, 0.2]
+            
+            # Split signal indices
             subset_lengths_x = [int(len(self.ds.data_x) * frac) for frac in subset_lengths]
             remainder = len(self.ds) - sum(subset_lengths_x)
-            # add 1 to all the lengths in round-robin fashion until the remainder is 0
+            # Distribute remainder across splits in round-robin fashion
             for i in range(remainder):
                 idx_to_add_at = i % len(subset_lengths_x)
                 subset_lengths_x[idx_to_add_at] += 1
-            indices_x = torch.randperm(sum(subset_lengths_x), generator=self.generator).tolist()  # type: ignore[arg-type, call-overload]
+            indices_x = torch.randperm(sum(subset_lengths_x), generator=self.generator).tolist()
 
+            # Split channel indices
             subset_lengths_h = [int(len(self.ds.data_h_t) * frac) for frac in subset_lengths]
             remainder = len(self.ds.data_h_t) - sum(subset_lengths_h)
-            # add 1 to all the lengths in round-robin fashion until the remainder is 0
+            # Distribute remainder across splits in round-robin fashion
             for i in range(remainder):
                 idx_to_add_at = i % len(subset_lengths_h)
                 subset_lengths_h[idx_to_add_at] += 1
-            indices_h = torch.randperm(sum(subset_lengths_h), generator=self.generator).tolist()  # type: ignore[arg-type, call-overload]
+            indices_h = torch.randperm(sum(subset_lengths_h), generator=self.generator).tolist()
 
+            # Create dataset subsets
             self.ds_train, self.ds_val, self.ds_test = [
                 TACMSubset(self.ds, indices_x[offset_x - length_x : offset_x], indices_h[offset_h - length_h : offset_h])
                 for offset_x, length_x, offset_h, length_h 
@@ -472,27 +652,47 @@ class TACMDataModule(pl.LightningDataModule):
             ]
 
     def on_after_batch_transfer(self, batch, dataloader_idx):
+        """
+        Apply channel effects and prepare batch data.
+        
+        This method:
+        1. Applies realistic channel effects to signals
+        2. Adds noise based on SNR settings
+        3. Normalizes signals to [-1, 1] range
+        4. Calculates SNR metrics (per-receiver and total)
+        
+        Args:
+            batch: Batch of data samples
+            dataloader_idx: Index of the dataloader
+            
+        Returns:
+            Processed batch with channel effects applied
+        """
         if isinstance(batch, dict):
             x = batch['x']
             h_t = batch['h_t']
 
+            # Apply channel and noise
             z, rx_pow_db, snr = self._apply_channel(x[:,:1,None], h_t, self.noise_power_lin, None)
             z = z.squeeze(2,3)[...,self.l_min*-1:self.l_max*-1]
 
-            # Per-frame normalize to -1.0:1.0
+            # Normalize to [-1.0, 1.0] range per frame
             new_min, new_max = -1.0, 1.0
-            z_max = torch.amax(torch.abs(z), axis=(1,2), keepdims=True) # farthest value from 0 in each channel
+            z_max = torch.amax(torch.abs(z), axis=(1,2), keepdims=True)  # farthest value from 0 in each channel
             scale = ((new_max - new_min) / (z_max*2))
             z *= scale
 
+            # Calculate SNR metrics
             p_total_dbm = 10*torch.log10(torch.sum(10**(rx_pow_db.flatten(1)/10), 1))
             p_noise_total_dbm = (10*torch.log10((10**((rx_pow_db - snr)/10)).sum((1,2))))
             snr_total = p_total_dbm - p_noise_total_dbm
-            if self.snr_inband: # inband snr
+            
+            if self.snr_inband:  # Apply in-band SNR calculation
                 bw = 10*torch.log10((1/batch['T_s'])*(1+batch['beta']))
                 snr -= bw[:,None,None]
                 snr_total -= bw
 
+            # Update batch with processed data
             batch['x'] = z
             batch['snr'] = snr.flatten(1)
             batch['snr_total'] = snr_total
@@ -502,15 +702,27 @@ class TACMDataModule(pl.LightningDataModule):
             return batch
     
     def train_dataloader(self) -> DataLoader:
+        """Return the training dataloader."""
         return self._data_loader(self.ds_train)
 
     def val_dataloader(self) -> DataLoader:
+        """Return the validation dataloader."""
         return self._data_loader(self.ds_val)
     
     def test_dataloader(self) -> DataLoader:
+        """Return the test dataloader."""
         return self._data_loader(self.ds_test)
 
     def _data_loader(self, dataset: Dataset) -> DataLoader:
+        """
+        Create a DataLoader with custom sampling for the TACM dataset.
+        
+        Args:
+            dataset: The dataset to create a loader for
+            
+        Returns:
+            Configured DataLoader with custom TACM sampler
+        """
         gen = torch.Generator().manual_seed(self.seed)
         return DataLoader(
             dataset,

@@ -1,4 +1,4 @@
-name: rf_amr
+name: tacm
 channels:
   - pytorch
   - nvidia
@@ -10,19 +10,27 @@ dependencies:
   - pytorch-cuda=12.4
   - lightning=2.3
   - torchmetrics
-  - tensorboard
-  - scikit-learn
-  - numpy
-  - scipy
-  - h5py
-  - matplotlib
+  
+  # Scientific computing
+  - numpy>=1.21
+  - scipy>=1.7
+  - pandas>=1.3
+  - h5py>=3.6
+  
+  # Visualization
+  - matplotlib>=3.5
   - seaborn
+  
+  # Development tools
   - jupyterlab
   - notebook
   - ipywidgets
   - pytest
+  - tensorboard
+  
+  # Machine learning utilities
+  - scikit-learn
+  - tqdm
+  
+  # Package management
   - pip
-  - pip:
-    # - git+https://github.com/mroftei/SionnaTorch.git@v0.3
-    # - git+https://github.com/robbmcleod/pyfastnoisesimd.git@v0.4.3
-    # - git+https://github.com/mroftei/TerrainGeneration@v0.3
