@@ -6,10 +6,10 @@ The TACM (Topographically-Augmented Channel Model) Dataset provides realistic ch
 
 Traditional AMR datasets often use simplified channel models that don't reflect real-world propagation conditions. The TACM dataset addresses this limitation by:
 
-- **Realistic Channel Effects**: Incorporates terrain-based 3GPP channel models with actual topographic variations
-- **Diverse Scenarios**: Supports multiple receiver configurations and deployment scenarios
+- **Realistic Channel Effects**: Incorporates terrain-based 3GPP channel models with generated topography
+- **Diverse Scenarios**: Supports multiple receiver configurations over generated terrain
 - **Easy Integration**: Provides a PyTorch Lightning DataModule for seamless integration into ML workflows
-- **Comprehensive Coverage**: Includes 8 modulation types with varying SNR conditions (-30 to +10 dB)
+- **Common Modulations**: Includes 8 modulation types with varying SNR conditions (-30 to +10 dB)
 
 ## 📦 Installation
 
@@ -133,8 +133,8 @@ batch = {
 |-----------|---------|-------------|
 | `dataset_root` | - | Root directory for dataset files |
 | `batch_size` | - | Mini-batch size |
-| `download` | `False` | Download base CSPB dataset |
-| `gen_chan` | `False` | Generate new channel files |
+| `download` | `True` | Download base CSPB dataset |
+| `gen_chan` | `True` | Generate new channel files |
 | `scenario` | `'a'` | Dataset scenario ('a', 'b', 'c', 'd') |
 | `frame_size` | `1024` | Signal frame size (must divide 32768) |
 | `n_rx` | `8` | Number of receivers |
@@ -146,4 +146,4 @@ batch = {
 
 ---
 
-**Note**: First-time setup requires downloading ~2GB of base signal data and generating channel files, which may take several hours depending on configuration.
+**Note**: First-time setup requires downloading ~28GB of base signal data and generating channel files, which may take several hours depending on configuration.
